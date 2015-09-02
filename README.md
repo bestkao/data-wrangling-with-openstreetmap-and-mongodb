@@ -638,6 +638,8 @@ http://overpass-api.de/output_formats.html
 
 
 ```python
+from datetime import datetime
+
 CREATED = ["version", "changeset", "timestamp", "user", "uid"]
 
 def shape_element(element):
@@ -647,30 +649,51 @@ def shape_element(element):
         
         # Parse attributes
         for attrib in element.attrib:
+
             # Data creation details
             if attrib in CREATED:
                 if 'created' not in node:
                     node['created'] = {}
-                node['created'][attrib] = element.get(attrib)
-            # Parse position
+                if attrib == 'timestamp':
+                    node['created'][attrib] = datetime.strptime(element.attrib[attrib], '%Y-%m-%dT%H:%M:%SZ')
+                else:
+                    node['created'][attrib] = element.get(attrib)
+
+            # Parse location
             if attrib in ['lat', 'lon']:
                 lat = float(element.attrib.get('lat'))
                 lon = float(element.attrib.get('lon'))
                 node['pos'] = [lat, lon]
+
             # Parse the rest of attributes
             else:
                 node[attrib] = element.attrib.get(attrib)
             
         # Process tags
         for tag in element.iter('tag'):
-            key = tag.attrib['k']
+            key   = tag.attrib['k']
             value = tag.attrib['v']
             if not problemchars.search(key):
-                if key[:5] == 'addr:':
+
+                # Tags with single colon and beginning with addr
+                if lower_colon.search(key) and key.find('addr') == 0:
                     if 'address' not in node:
                         node['address'] = {}
-                    if ':' not in key[5:]:
-                        node['address'][key[5:]] = value
+                    sub_attr = key.split(':')[1]
+                    if is_street_name(tag):
+                        # Do some cleaning
+                        better_name = update_name(name, street_type_mapping, street_type_re)
+                        best_name   = update_name(better_name, cardinal_mapping, street_type_pre)
+                        node['address'][sub_attr] = best_name
+                    else:    
+                        node['address'][sub_attr] = value
+
+                # All other tags that don't begin with "addr"
+                elif not key.find('addr') == 0:
+                    if key not in node:
+                        node[key] = value
+                else:
+                    node["tag:" + key] = value
         
         # Process nodes
         for nd in element.iter('nd'):
@@ -683,11 +706,14 @@ def shape_element(element):
         return None
 ```
 
-Now parse the XML, shape the elements, and write to a json file
+Now parse the XML, shape the elements, and write to a json file.
+
+We're using BSON for compatibility with the date aggregation operators. There is also a Timestamp type in MongoDB, but use of this type is explicitly discouraged by the [documentation](http://docs.mongodb.org/manual/core/document/#timestamps).
 
 
 ```python
 import json
+from bson import json_util
 
 def process_map(file_in, pretty = False):
     file_out = "{0}.json".format(file_in)    
@@ -696,9 +722,9 @@ def process_map(file_in, pretty = False):
             el = shape_element(element)
             if el:
                 if pretty:
-                    fo.write(json.dumps(el, indent=2)+"\n")
+                    fo.write(json.dumps(el, indent=2, default=json_util.default)+"\n")
                 else:
-                    fo.write(json.dumps(el) + "\n")
+                    fo.write(json.dumps(el, default=json_util.default) + "\n")
 
 process_map(filename)
 ```
@@ -710,7 +736,7 @@ Lets look at the size of the files we worked with and generated.
 
 ```python
 import os
-print "The downloaded file is {} MB".format(os.path.getsize(filename)/1.0e6) # convert from bytes to megabytes
+print 'The downloaded file is {} MB'.format(os.path.getsize(filename)/1.0e6) # convert from bytes to megabytes
 ```
 
     The downloaded file is 50.66996 MB
@@ -718,10 +744,10 @@ print "The downloaded file is {} MB".format(os.path.getsize(filename)/1.0e6) # c
 
 
 ```python
-print "The json file is {} MB".format(os.path.getsize(filename + ".json")/1.0e6) # convert from bytes to megabytes
+print 'The json file is {} MB'.format(os.path.getsize(filename + ".json")/1.0e6) # convert from bytes to megabytes
 ```
 
-    The json file is 79.072265 MB
+    The json file is 83.383804 MB
 
 
 **Plenty of Street Addresses**
@@ -772,7 +798,7 @@ import subprocess
 
 # The os.setsid() is passed in the argument preexec_fn so
 # it's run after the fork() and before  exec() to run the shell.
-pro = subprocess.Popen("mongod", preexec_fn = os.setsid)
+pro = subprocess.Popen('mongod', preexec_fn = os.setsid)
 ```
 
 Next, connect to the database with `pymongo`
@@ -794,24 +820,23 @@ Then just import the dataset with `mongoimport`.
 
 ```python
 # Build mongoimport command
-collection = filename[:filename.find(".")]
-working_directory = "/Users/James/Dropbox/Projects/da/data-wrangling-with-openstreetmap-and-mongodb/"
-json_file = filename + ".json"
+collection = filename[:filename.find('.')]
+working_directory = '/Users/James/Dropbox/Projects/da/data-wrangling-with-openstreetmap-and-mongodb/'
+json_file = filename + '.json'
 
-mongoimport_cmd = "mongoimport -h 127.0.0.1:27017 " + \
-                  "--db " + db_name + \
-                  " --collection " + collection + \
-                  " --file " + working_directory + json_file
+mongoimport_cmd = 'mongoimport -h 127.0.0.1:27017 ' + \
+                  '--db ' + db_name + \
+                  ' --collection ' + collection + \
+                  ' --file ' + working_directory + json_file
 
 # Before importing, drop collection if it exists (i.e. a re-run)
 if collection in db.collection_names():
-    print "Dropping collection: " + collection
+    print 'Dropping collection: ' + collection
     db[collection].drop()
     
 # Execute the command
-print "Executing: " + mongoimport_cmd
+print 'Executing: ' + mongoimport_cmd
 subprocess.call(mongoimport_cmd.split())
-subprocess.call('ls')
 ```
 
     Dropping collection: cupertino_california
@@ -868,7 +893,7 @@ len(cupertino_california.distinct('created.user'))
 
 
 ```python
-cupertino_california.aggregate({'$group': {'_id': '$type',
+cupertino_california.aggregate({'$group': {'_id': '$type', \
                                            'count': {'$sum' : 1}}})['result']
 ```
 
@@ -879,39 +904,100 @@ cupertino_california.aggregate({'$group': {'_id': '$type',
 
 
 
-**number of chosen type of nodes, like cafes, shops etc**
+**Top Three Contributors**
 
 
 ```python
-cupertino_california.aggregate([{"$group" : {"_id" : "$created.user", "count" : {"$sum" : 1}}}, \
-                           {"$sort" : {"count" : -1}}, \
-                           {"$limit" : 1}])['result']
+top_users = cupertino_california.aggregate([{'$group': {'_id': '$created.user', \
+                                                        'count': {'$sum' : 1}}}, \
+                                            {'$sort': {'count' : -1}}, \
+                                            {'$limit': 3}])['result']
+
+pprint.pprint(top_users)
+print
+
+for user in top_users:
+    pprint.pprint(cupertino_california.find({'created.user': user['_id']})[0])
 ```
 
+    [{u'_id': u'n76', u'count': 66090},
+     {u'_id': u'mk408', u'count': 37175},
+     {u'_id': u'Bike Mapper', u'count': 27545}]
+    
+    {u'_id': ObjectId('55e69dc45c014321a5c76759'),
+     u'changeset': u'16866449',
+     u'created': {u'changeset': u'16866449',
+                  u'timestamp': datetime.datetime(2013, 7, 7, 21, 29, 38),
+                  u'uid': u'318696',
+                  u'user': u'n76',
+                  u'version': u'21'},
+     u'highway': u'traffic_signals',
+     u'id': u'26027690',
+     u'pos': [37.3531613, -122.0140663],
+     u'timestamp': u'2013-07-07T21:29:38Z',
+     u'type': u'node',
+     u'uid': u'318696',
+     u'user': u'n76',
+     u'version': u'21'}
+    {u'_id': ObjectId('55e69dc45c014321a5c76765'),
+     u'changeset': u'3923975',
+     u'created': {u'changeset': u'3923975',
+                  u'timestamp': datetime.datetime(2010, 2, 20, 14, 28, 36),
+                  u'uid': u'201724',
+                  u'user': u'mk408',
+                  u'version': u'2'},
+     u'id': u'26117855',
+     u'pos': [37.3584066, -122.016459],
+     u'timestamp': u'2010-02-20T14:28:36Z',
+     u'type': u'node',
+     u'uid': u'201724',
+     u'user': u'mk408',
+     u'version': u'2'}
+    {u'_id': ObjectId('55e69dc45c014321a5c76761'),
+     u'changeset': u'31215083',
+     u'created': {u'changeset': u'31215083',
+                  u'timestamp': datetime.datetime(2015, 5, 17, 0, 1, 56),
+                  u'uid': u'74705',
+                  u'user': u'Bike Mapper',
+                  u'version': u'25'},
+     u'id': u'26029632',
+     u'pos': [37.3523544, -122.0122361],
+     u'timestamp': u'2015-05-17T00:01:56Z',
+     u'type': u'node',
+     u'uid': u'74705',
+     u'user': u'Bike Mapper',
+     u'version': u'25'}
 
 
-
-    [{u'_id': u'n76', u'count': 66090}]
-
-
+**Three Most Referenced Nodes**
 
 
 ```python
-node_id = cupertino_california.aggregate([{"$unwind" : "$node_refs"}, \
-                                     {"$group" : {"_id" : "$node_refs", "count" : {"$sum" : 1}}}, \
-                                     {"$sort" : {"count" : -1}}, \
-                                     {"$limit" : 1}])['result'][0]['_id']
+top_nodes = cupertino_california.aggregate([{'$unwind': '$node_refs'}, \
+                                            {'$group': {'_id': '$node_refs', \
+                                                        'count': {'$sum': 1}}}, \
+                                            {'$sort': {'count': -1}}, \
+                                            {'$limit': 3}])['result']
 
-pprint.pprint(cupertino_california.find({"id" : node_id})[0])
+pprint.pprint(top_nodes)
+print
+
+for node in top_nodes:
+    pprint.pprint(cupertino_california.find({'id': node['_id']})[0])
 ```
 
-    {u'_id': ObjectId('55e6593bc3e84ed4376165c8'),
+    [{u'_id': u'282814553', u'count': 9},
+     {u'_id': u'3567695709', u'count': 7},
+     {u'_id': u'3678198975', u'count': 7}]
+    
+    {u'_id': ObjectId('55e69dc45c014321a5c7b228'),
      u'changeset': u'32109704',
      u'created': {u'changeset': u'32109704',
-                  u'timestamp': u'2015-06-21T05:07:49Z',
+                  u'timestamp': datetime.datetime(2015, 6, 21, 5, 7, 49),
                   u'uid': u'33757',
                   u'user': u'Minh Nguyen',
                   u'version': u'19'},
+     u'highway': u'traffic_signals',
      u'id': u'282814553',
      u'pos': [37.3520588, -121.93721],
      u'timestamp': u'2015-06-21T05:07:49Z',
@@ -919,11 +1005,41 @@ pprint.pprint(cupertino_california.find({"id" : node_id})[0])
      u'uid': u'33757',
      u'user': u'Minh Nguyen',
      u'version': u'19'}
+    {u'_id': ObjectId('55e69dca5c014321a5ca7eed'),
+     u'changeset': u'31682562',
+     u'created': {u'changeset': u'31682562',
+                  u'timestamp': datetime.datetime(2015, 6, 3, 4, 56, 24),
+                  u'uid': u'33757',
+                  u'user': u'Minh Nguyen',
+                  u'version': u'1'},
+     u'id': u'3567695709',
+     u'pos': [37.3354655, -121.9078015],
+     u'timestamp': u'2015-06-03T04:56:24Z',
+     u'type': u'node',
+     u'uid': u'33757',
+     u'user': u'Minh Nguyen',
+     u'version': u'1'}
+    {u'_id': ObjectId('55e69dca5c014321a5ca9881'),
+     u'changeset': u'33058613',
+     u'created': {u'changeset': u'33058613',
+                  u'timestamp': datetime.datetime(2015, 8, 2, 23, 59, 13),
+                  u'uid': u'33757',
+                  u'user': u'Minh Nguyen',
+                  u'version': u'1'},
+     u'id': u'3678198975',
+     u'pos': [37.327171, -121.9337872],
+     u'timestamp': u'2015-08-02T23:59:13Z',
+     u'type': u'node',
+     u'uid': u'33757',
+     u'user': u'Minh Nguyen',
+     u'version': u'1'}
 
+
+**Number of Documents with Street Addresses**
 
 
 ```python
-cupertino_california.find({"address.street" : {"$exists" : 1}}).count()
+cupertino_california.find({'address.street': {'$exists': 1}}).count()
 ```
 
 
@@ -933,11 +1049,14 @@ cupertino_california.find({"address.street" : {"$exists" : 1}}).count()
 
 
 
+**List of Zip Codes**
+
 
 ```python
-cupertino_california.aggregate([{"$match" : {"address.postcode" : {"$exists" : 1}}}, \
-                           {"$group" : {"_id" : "$address.postcode", "count" : {"$sum" : 1}}}, \
-                           {"$sort" : {"count" : -1}}])['result']
+cupertino_california.aggregate([{'$match': {'address.postcode': {'$exists': 1}}}, \
+                                {'$group': {'_id': '$address.postcode', \
+                                            'count': {'$sum': 1}}}, \
+                                {'$sort': {'count': -1}}])['result']
 ```
 
 
@@ -971,11 +1090,19 @@ cupertino_california.aggregate([{"$match" : {"address.postcode" : {"$exists" : 1
 
 
 
+It looks like have some invalid zip codes, with the state name or unicode characters included.
+
+The zip codes with 4 digit postal codes included are still valid though, and we might consider removing these postal codes during the cleaning process.
+
+**Cities with Most Records**
+
 
 ```python
-cupertino_california.aggregate([{"$match" : {"address.city" : {"$exists" : 1}}}, \
-                           {"$group" : {"_id" : "$address.city", "count" : {"$sum" : 1}}}, \
-                           {"$sort" : {"count" : -1}}])['result']
+cupertino_california.aggregate([{'$match': {'address.city': {'$exists': 1}}}, \
+                                {'$group': {'_id': '$address.city', \
+                                            'count': {'$sum': 1}}}, \
+                                {'$sort': {'count': -1}}])['result']
+
 ```
 
 
@@ -1002,7 +1129,159 @@ cupertino_california.aggregate([{"$match" : {"address.city" : {"$exists" : 1}}},
 
 
 
+Likewise, some cities capitalization and the accented-e gives way to more auditing and cleaning.
+
+It's interesting to note how well Sunnyvale and Santa Clara have been documented, relative to the other cities despite having the area covering mostly Cupertino, Saratoga, West San Jose.
+
+**Top 10 Amenities**
+
 
 ```python
-
+cupertino_california.aggregate([{'$match': {'amenity': {'$exists': 1}}}, \
+                                {'$group': {'_id': '$amenity', \
+                                            'count': {'$sum': 1}}}, \
+                                {'$sort': {'count': -1}}, \
+                                {'$limit': 10}])['result']
 ```
+
+
+
+
+    [{u'_id': u'parking', u'count': 437},
+     {u'_id': u'restaurant', u'count': 279},
+     {u'_id': u'school', u'count': 243},
+     {u'_id': u'place_of_worship', u'count': 153},
+     {u'_id': u'fast_food', u'count': 147},
+     {u'_id': u'cafe', u'count': 85},
+     {u'_id': u'fuel', u'count': 79},
+     {u'_id': u'bicycle_parking', u'count': 72},
+     {u'_id': u'bank', u'count': 66},
+     {u'_id': u'bench', u'count': 60}]
+
+
+
+** Top 10 Banks**
+
+It's a pain when there isn't a local branch of your bank closeby. Lets what banks have the most locations in this area to avoid this.
+
+
+```python
+cupertino_california.aggregate([{'$match': {'amenity': 'bank'}}, \
+                                {'$group': {'_id': '$name', \
+                                            'count': {'$sum': 1}}}, \
+                                {'$sort': {'count': -1}}, \
+                                {'$limit': 10}])['result']
+```
+
+
+
+
+    [{u'_id': u'Bank of America', u'count': 10},
+     {u'_id': u'Chase', u'count': 8},
+     {u'_id': None, u'count': 7},
+     {u'_id': u'US Bank', u'count': 5},
+     {u'_id': u'Citibank', u'count': 5},
+     {u'_id': u'Wells Fargo', u'count': 5},
+     {u'_id': u'First Tech Federal Credit Union', u'count': 2},
+     {u'_id': u'Union Bank', u'count': 2},
+     {u'_id': u'Bank of the West', u'count': 2},
+     {u'_id': u'Chase Bank', u'count': 2}]
+
+
+
+## Other Ideas About the Dataset
+
+From exploring the OpenStreetMap dataset, I found the data structure to be flexible enough to include a vast multitude of user generated quantitative and qualitative data beyond that of simply defining a virtual map. There's plenty of potential to extend OpenStreetMap to include user reviews of establishments, subjective areas of what classifies a good vs bad neighborhood, housing price data, school reviews, walkability/bikeability, quality of mass transit, and a bunch of other metrics that could form a solid foundation for robust recommender systems. These recommender systems could aid users in deciding where to live or what cool food joints to check out.
+
+The data is far too incomplete to be able to implement such recommender systems as it stands now, but the OpenStreetMap project could really benefit from visualizing data on content generation within their maps. For example, a heat map layer could be overlayed on the map showing how frequently or how recently certain regions of the map have been updated. These map layers could help guide users towards areas of the map that need attention in order to help more fully complete the data set.
+
+Next I will cover a couple of queries that are aligned with these ideas about the velocity and volume of content generation
+
+**Amount of Nodes Elements Created by Day of Week**
+
+I will use the `$dayOfWeek` operator to extract the day of week from the `created.timestamp` field, where 1 is Sunday and 7 is Saturday:
+
+http://docs.mongodb.org/manual/reference/operator/aggregation/dayOfWeek/
+
+
+```python
+cupertino_california.aggregate([{'$project': {'dayOfWeek': {'$dayOfWeek': '$created.timestamp'}}}, \
+                                {'$group': {'_id': '$dayOfWeek', \
+                                            'count': {'$sum': 1}}}, \
+                                {'$sort': {'_id': 1}}])['result']
+```
+
+
+
+
+    [{u'_id': 1, u'count': 44247},
+     {u'_id': 2, u'count': 39205},
+     {u'_id': 3, u'count': 39398},
+     {u'_id': 4, u'count': 35923},
+     {u'_id': 5, u'count': 33127},
+     {u'_id': 6, u'count': 21174},
+     {u'_id': 7, u'count': 29972}]
+
+
+
+It seems like users were more active on in the beginning of the week.
+
+**Age of Elements**
+
+Lets see how old elements were created in the XML using the `created.timestamp` field and visualize this data by pushing the calculated values into a list.
+
+
+```python
+ages = cupertino_california.aggregate([ \
+               {'$project': {'ageInMilliseconds': {'$subtract': [datetime.now(), '$created.timestamp']}}}, \
+               {'$project': {'_id': 0, \
+                             'ageInDays': {'$divide': ['$ageInMilliseconds', 1000*60*60*24]}}}, \
+               {'$group'  : {'_id': 1, \
+                             'ageInDays': {'$push': '$ageInDays'}}}, \
+               {'$project': {'_id': 0, \
+                             'ageInDays': 1}}])['result'][0]
+```
+
+Now I have a dictionary with an `ageInDays` key and a list of floats as the value. Next, I will create a pandas dataframe from this dictionary
+
+
+```python
+from pandas import DataFrame
+
+age_df = DataFrame.from_dict(ages)
+# age_df.index.name = 'element'
+print age_df.head()
+```
+
+         ageInDays
+    0  1709.554143
+    1  1709.552893
+    2  1709.675798
+    3  1709.676018
+    4  1709.676331
+
+
+Lets plot a histogram of this series with our best friend `ggplot`. The binwidth is set to 30 (about a month)
+
+
+```python
+%matplotlib inline
+from ggplot import *
+import warnings
+
+# ggplot usage of pandas throws a future warning
+warnings.filterwarnings('ignore')
+
+print ggplot(aes(x='ageInDays'), data=age_df) + \
+             geom_histogram(binwidth=30, fill='#007ee5')
+```
+
+
+![png](output_97_0.png)
+
+
+    <ggplot: (322176817)>
+
+
+Note the rise and fall of large spikes of activity occurring about every 400 days. I hypothesize that these are due to single users making many edits in this concentrated map area in a short period of time.
+
