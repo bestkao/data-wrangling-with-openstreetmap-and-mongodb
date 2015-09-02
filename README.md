@@ -558,7 +558,7 @@ for cardinal_direction, ways in cardinal_directions.iteritems():
     if cardinal_direction in cardinal_mapping:
         for name in ways:
             better_name = update_name(name, street_type_mapping, street_type_re)
-            best_name = update_name(better_name, cardinal_mapping, street_type_pre)
+            best_name   = update_name(better_name, cardinal_mapping, street_type_pre)
             print name, "=>", better_name, "=>", best_name
 ```
 
@@ -566,33 +566,6 @@ for cardinal_direction, ways in cardinal_directions.iteritems():
     S. Bascom => S. Bascom => South Bascom
     N Blaney Ave => N Blaney Avenue => North Blaney Avenue
 
-
-**Lack of Street Address Data**
-
-Besides dirty data within the `addr:street` field, there is an apparent lack of data on street addresses altogether. Here I will count the total number of nodes and ways that contain a tag child with `k="addr:street"`
-
-
-```python
-osm_file = open(filename, "r")
-address_count = 0
-
-for event, elem in ET.iterparse(osm_file, events=("start",)):
-    if elem.tag == "node" or elem.tag == "way":
-        for tag in elem.iter("tag"): 
-            if is_street_name(tag):
-                address_count += 1
-
-address_count
-```
-
-
-
-
-    8958
-
-
-
-Even for this relatively rural area, this is a very small number of locations on the map to have their street addresses tagged
 
 ## Preparing for MongoDB
 
@@ -665,29 +638,30 @@ http://overpass-api.de/output_formats.html
 
 
 ```python
-CREATED = [ "version", "changeset", "timestamp", "user", "uid"]
+CREATED = ["version", "changeset", "timestamp", "user", "uid"]
 
 def shape_element(element):
     node = {}    
     if element.tag == "node" or element.tag == "way" :
-        # created dict
-        node['created'] = {}
-        for k in CREATED:
-            node['created'][k] = element.get(k)
-            
-        # position array
-        if element.attrib.get('lat') and element.attrib.get('lon'):
-            lat = float(element.attrib.get('lat'))
-            lon = float(element.attrib.get('lon'))
-            node['pos'] = [lat, lon]
-            
-        # id, type, & visible keys
-        node['id'] = element.attrib['id']
         node['type'] = element.tag
-        if element.attrib.get('visible'):
-            node['visible'] = element.attrib['visible']
+        
+        # Parse attributes
+        for attrib in element.attrib:
+            # Data creation details
+            if attrib in CREATED:
+                if 'created' not in node:
+                    node['created'] = {}
+                node['created'][attrib] = element.get(attrib)
+            # Parse position
+            if attrib in ['lat', 'lon']:
+                lat = float(element.attrib.get('lat'))
+                lon = float(element.attrib.get('lon'))
+                node['pos'] = [lat, lon]
+            # Parse the rest of attributes
+            else:
+                node[attrib] = element.attrib.get(attrib)
             
-        # process tags
+        # Process tags
         for tag in element.iter('tag'):
             key = tag.attrib['k']
             value = tag.attrib['v']
@@ -698,7 +672,7 @@ def shape_element(element):
                     if ':' not in key[5:]:
                         node['address'][key[5:]] = value
         
-        # process nodes
+        # Process nodes
         for nd in element.iter('nd'):
             if 'node_refs' not in node:
                 node['node_refs'] = []
@@ -714,7 +688,6 @@ Now parse the XML, shape the elements, and write to a json file
 
 ```python
 import json
-from bson import json_util 
 
 def process_map(file_in, pretty = False):
     file_out = "{0}.json".format(file_in)    
@@ -723,16 +696,16 @@ def process_map(file_in, pretty = False):
             el = shape_element(element)
             if el:
                 if pretty:
-                    fo.write(json.dumps(el, indent=2, default=json_util.default)+"\n")
+                    fo.write(json.dumps(el, indent=2)+"\n")
                 else:
-                    fo.write(json.dumps(el, default=json_util.default) + "\n")
+                    fo.write(json.dumps(el) + "\n")
 
 process_map(filename)
 ```
 
 ## Overview of the Data
 
-Lets look at the size of this file
+Lets look at the size of the files we worked with and generated.
 
 
 ```python
@@ -748,35 +721,286 @@ print "The downloaded file is {} MB".format(os.path.getsize(filename)/1.0e6) # c
 print "The json file is {} MB".format(os.path.getsize(filename + ".json")/1.0e6) # convert from bytes to megabytes
 ```
 
-    The json file is 51.518934 MB
+    The json file is 79.072265 MB
 
 
-## Working with MongoDB
+**Plenty of Street Addresses**
 
-To import this json file to MongoDB, I will use the subprocess module to run shell commands.
-
-The first task is to execute mongod to run MongoDB
+Besides dirty data within the `addr:street` field, we're working with a sizeable amount of data on street addresses. Here I will count the total number of nodes and ways that contain a tag child with `k="addr:street"`
 
 
 ```python
-# figure out how to run mongod process via ipython notebook
+osm_file = open(filename, "r")
+address_count = 0
+
+for event, elem in ET.iterparse(osm_file, events=("start",)):
+    if elem.tag == "node" or elem.tag == "way":
+        for tag in elem.iter("tag"): 
+            if is_street_name(tag):
+                address_count += 1
+
+address_count
+```
+
+
+
+
+    8958
+
+
+
+There are plenty of locations on the map that has their street addresses tagged. It looks like OpenStreetMap's community has collected a good amount of data for this area.
+
+## Working with MongoDB
+
+The first task is to execute mongod to run MongoDB. There are plenty of guides to do this. On OS X, if you have `mongodb` installed via homebrew, homebrew actually has a handy `brew services` command.
+
+To start mongodb:
+
+    brew services start mongodb
+
+To stop mongodb if it's already running:
+
+    brew services stop mongodb
+
+Alternatively, if you have MongoDB installed and configured already we can run a subprocess for the duration of the python session:
+
+
+```python
+import signal
+import subprocess
+
+# The os.setsid() is passed in the argument preexec_fn so
+# it's run after the fork() and before  exec() to run the shell.
+pro = subprocess.Popen("mongod", preexec_fn = os.setsid)
 ```
 
 Next, connect to the database with `pymongo`
 
 
 ```python
-# connect to localhost:27017
+from pymongo import MongoClient
+
+db_name = 'openstreetmap'
+
+# Connect to Mongo DB
+client = MongoClient('localhost:27017')
+# Database 'openstreetmap' will be created if it does not exist.
+db = client[db_name]
 ```
 
-Then importing the dataset with `mongoimport`.
+Then just import the dataset with `mongoimport`.
 
 
 ```python
-# drop processed json file into collection cupertino_california
+# Build mongoimport command
+collection = filename[:filename.find(".")]
+working_directory = "/Users/James/Dropbox/Projects/da/data-wrangling-with-openstreetmap-and-mongodb/"
+json_file = filename + ".json"
+
+mongoimport_cmd = "mongoimport -h 127.0.0.1:27017 " + \
+                  "--db " + db_name + \
+                  " --collection " + collection + \
+                  " --file " + working_directory + json_file
+
+# Before importing, drop collection if it exists (i.e. a re-run)
+if collection in db.collection_names():
+    print "Dropping collection: " + collection
+    db[collection].drop()
+    
+# Execute the command
+print "Executing: " + mongoimport_cmd
+subprocess.call(mongoimport_cmd.split())
+subprocess.call('ls')
 ```
 
-## Cool Stats and Queries. To Be Continued..
+    Dropping collection: cupertino_california
+    Executing: mongoimport -h 127.0.0.1:27017 --db openstreetmap --collection cupertino_california --file /Users/James/Dropbox/Projects/da/data-wrangling-with-openstreetmap-and-mongodb/cupertino_california.osm.json
+
+
+
+
+
+    0
+
+
+
+## Investigating the Data
+
+After importing, get the collection from the database.
+
+
+```python
+cupertino_california = db[collection]
+```
+
+Here's where the fun stuff starts. Now that we have a audited and cleaned up collection, we can query for a bunch of interesting statistics.
+
+**Number of Documents**
+
+
+```python
+cupertino_california.find().count()
+```
+
+
+
+
+    243046
+
+
+
+**Number of Unique Users**
+
+
+```python
+len(cupertino_california.distinct('created.user'))
+```
+
+
+
+
+    528
+
+
+
+**Number of Nodes and Ways**
+
+
+```python
+cupertino_california.aggregate({'$group': {'_id': '$type',
+                                           'count': {'$sum' : 1}}})['result']
+```
+
+
+
+
+    [{u'_id': u'way', u'count': 28404}, {u'_id': u'node', u'count': 214642}]
+
+
+
+**number of chosen type of nodes, like cafes, shops etc**
+
+
+```python
+cupertino_california.aggregate([{"$group" : {"_id" : "$created.user", "count" : {"$sum" : 1}}}, \
+                           {"$sort" : {"count" : -1}}, \
+                           {"$limit" : 1}])['result']
+```
+
+
+
+
+    [{u'_id': u'n76', u'count': 66090}]
+
+
+
+
+```python
+node_id = cupertino_california.aggregate([{"$unwind" : "$node_refs"}, \
+                                     {"$group" : {"_id" : "$node_refs", "count" : {"$sum" : 1}}}, \
+                                     {"$sort" : {"count" : -1}}, \
+                                     {"$limit" : 1}])['result'][0]['_id']
+
+pprint.pprint(cupertino_california.find({"id" : node_id})[0])
+```
+
+    {u'_id': ObjectId('55e6593bc3e84ed4376165c8'),
+     u'changeset': u'32109704',
+     u'created': {u'changeset': u'32109704',
+                  u'timestamp': u'2015-06-21T05:07:49Z',
+                  u'uid': u'33757',
+                  u'user': u'Minh Nguyen',
+                  u'version': u'19'},
+     u'id': u'282814553',
+     u'pos': [37.3520588, -121.93721],
+     u'timestamp': u'2015-06-21T05:07:49Z',
+     u'type': u'node',
+     u'uid': u'33757',
+     u'user': u'Minh Nguyen',
+     u'version': u'19'}
+
+
+
+```python
+cupertino_california.find({"address.street" : {"$exists" : 1}}).count()
+```
+
+
+
+
+    9095
+
+
+
+
+```python
+cupertino_california.aggregate([{"$match" : {"address.postcode" : {"$exists" : 1}}}, \
+                           {"$group" : {"_id" : "$address.postcode", "count" : {"$sum" : 1}}}, \
+                           {"$sort" : {"count" : -1}}])['result']
+```
+
+
+
+
+    [{u'_id': u'94087', u'count': 226},
+     {u'_id': u'95070', u'count': 225},
+     {u'_id': u'95051', u'count': 127},
+     {u'_id': u'95014', u'count': 106},
+     {u'_id': u'95129', u'count': 86},
+     {u'_id': u'95126', u'count': 45},
+     {u'_id': u'95008', u'count': 41},
+     {u'_id': u'95050', u'count': 28},
+     {u'_id': u'95125', u'count': 13},
+     {u'_id': u'94086', u'count': 12},
+     {u'_id': u'95117', u'count': 9},
+     {u'_id': u'95128', u'count': 8},
+     {u'_id': u'94024', u'count': 5},
+     {u'_id': u'95124', u'count': 4},
+     {u'_id': u'94040', u'count': 3},
+     {u'_id': u'95032', u'count': 3},
+     {u'_id': u'94087-2248', u'count': 1},
+     {u'_id': u'94087\u200e', u'count': 1},
+     {u'_id': u'94088-3707', u'count': 1},
+     {u'_id': u'95110', u'count': 1},
+     {u'_id': u'95052', u'count': 1},
+     {u'_id': u'CA 95014', u'count': 1},
+     {u'_id': u'95914', u'count': 1},
+     {u'_id': u'94022', u'count': 1},
+     {u'_id': u'CA 94086', u'count': 1}]
+
+
+
+
+```python
+cupertino_california.aggregate([{"$match" : {"address.city" : {"$exists" : 1}}}, \
+                           {"$group" : {"_id" : "$address.city", "count" : {"$sum" : 1}}}, \
+                           {"$sort" : {"count" : -1}}])['result']
+```
+
+
+
+
+    [{u'_id': u'Sunnyvale', u'count': 2476},
+     {u'_id': u'Saratoga', u'count': 221},
+     {u'_id': u'Santa Clara', u'count': 142},
+     {u'_id': u'San Jose', u'count': 99},
+     {u'_id': u'Cupertino', u'count': 59},
+     {u'_id': u'Campbell', u'count': 37},
+     {u'_id': u'San Jos\xe9', u'count': 9},
+     {u'_id': u'Los Altos', u'count': 7},
+     {u'_id': u'Campbelll', u'count': 3},
+     {u'_id': u'Mountain View', u'count': 3},
+     {u'_id': u'cupertino', u'count': 2},
+     {u'_id': u'Santa clara', u'count': 1},
+     {u'_id': u'santa clara', u'count': 1},
+     {u'_id': u'campbell', u'count': 1},
+     {u'_id': u'san jose', u'count': 1},
+     {u'_id': u'Los Gatos', u'count': 1},
+     {u'_id': u'South Mary Avenue', u'count': 1},
+     {u'_id': u'sunnyvale', u'count': 1}]
+
+
 
 
 ```python
